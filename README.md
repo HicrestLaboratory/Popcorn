@@ -1,35 +1,35 @@
-# Setup
+# Popcorn: Accelerating Kernel K-means on GPU
+Our [PPoPP 2025 paper](https://arxiv.org/pdf/2501.05587) introduces a new sparse-matrix formulation of Kernel K-means that enables an efficient, high-performance GPU implementation. Our open-source tool, Popcorn, achieves up to 123.8× speedup over a CPU version and 2.6× over a dense GPU implementation.
 
-## Python
+## Prerequisites
+
+### Python
 Needed for python utils like `data_generator` and `scatter_plot`.
 
 ```bash
 pip install -r py_utils/requirements.txt
 ```
 
-## Catch2
+### Catch2
 Unit testing for C++.
 
 ```bash
 git clone https://github.com/catchorg/Catch2.git
 ```
 
-# Python utils
-
-## Data generator
+### Data generator
 This script can be used to generate random datasets. If attribute `-k` is specified the dataset contains clusterized points
 ```bash
 python3 py_utils/data_generator.py -n 1000 -d 3 -k 4 -min 0 -max 10 -o datasets/3Dpoints.csv
 ```
 
-## Plots
+### Plots
 This script can be used to display results (reading csv output files).
 
 ```bash
 python3 py_utils/scatter_plot.py -f 3Dpoints.csv -d 3
 ```
 
-# GPU Kmeans
 ## Compile
 These are the commands that can be used to compile GPU Kmeans.
 
@@ -77,3 +77,21 @@ Example:
 ```
 
 Runs `gpukmeans` on the dataset `N1797_D64_digits-sklearn.csv` considering: 64 dimensions, 1797 points, 10 clusters, 300 maximum iterations, tolerance 1e-4, and output the results to `res.csv`.
+
+## Citation
+
+If you find this repo helpful to your work, please cite our article:
+
+```
+@inproceedings{bellavita2025popcorn,
+  title={Popcorn: Accelerating Kernel K-means on GPUs through Sparse Linear Algebra},
+  author={Bellavita, Julian and Pasquali, Thomas and Del Rio Martin, Laura and Vella, Flavio and Guidi, Giulia},
+  booktitle={Proceedings of the 30th ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel Programming},
+  pages={426--440},
+  year={2025}
+}
+```
+
+## Acknowledgment
+
+This work was a collaboration between the [HiCrest Laboratory at the University of Trento](https://hicrest.unitn.it/) (Italy) and the [Cornell HPC Group at Cornell University](https://giuliaguidi.github.io/) (USA). The [first author](https://jb2695.wixsite.com/jbellavita) was supported by DOE CSGF. The authors acknowledge financial support from ICSC – Centro Nazionale di Ricerca in High-Performance Computing, Big Data and Quantum Computing, funded by European Union – NextGenerationEU. This work has received funding from the European High-Performance Computing Joint Undertaking (JU) under grant agreement No 101175702 and the NationalInstitute of Higher Mathematics Francesco Severi. This research used resources of the National Energy Research Scientific Computing Center, a DOE Office of Science User Facility supported by the Office of Science of the U.S. Department of Energy under Contract No. DE-AC02-05CH11231 using NERSC award ASCR-ERCAP0030076. This project received support from the Center for Research on Programmable Plant Systems under National Science Foundation Grant No. DBI-2019674.
