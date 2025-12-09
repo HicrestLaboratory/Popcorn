@@ -1,4 +1,4 @@
-# Popcorn: Accelerating Kernel K-means on GPU
+# Popcorn: Accelerating Kernel K-means on GPU using Sparse Linear Algebra
 Our [PPoPP 2025 paper](https://arxiv.org/pdf/2501.05587) introduces a new sparse-matrix formulation of Kernel K-means that enables an efficient, high-performance GPU implementation. Our open-source tool, Popcorn, achieves up to 123.8× speedup over a CPU version and 2.6× over a dense GPU implementation.
 
 ## Prerequisites
