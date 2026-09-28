@@ -6,7 +6,9 @@
 #include <cusparse.h>
 #include <cub/cub.cuh>
 
-using namespace std;
+using std::cout;
+using std::cerr;
+using std::endl;
 
 #define clz(x) __builtin_clz(x)
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))

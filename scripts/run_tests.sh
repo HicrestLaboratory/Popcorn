@@ -1,16 +1,13 @@
 #!/bin/bash
+# Build and run the unit tests. Catch2 3 must be findable by CMake
+# (for example, add its install prefix to CMAKE_PREFIX_PATH).
+set -e
 
-mkdir -p build
-cd build
-cmake ..
-cmake --build . --target unit_kernels
-
-if [ $? -eq 0 ]
-then
-  # ./tests/bin/unit_kernels -v high kernel_distances_matrix # --rng-seed 12345
-  # ./tests/bin/unit_kernels -v high kernel_distances_warp # --rng-seed 1234
-  # ./tests/bin/unit_kernels -v high kernel_centroids # --rng-seed 1234
-  # ./tests/bin/unit_kernels -v high kernel_argmin # --rng-seed 1234
-  ./tests/bin/unit_kernels -v high
-  # -s -d yes
+PREFIX_ARGS=""
+if [ -n "$CONDA_PREFIX" ]; then
+  PREFIX_ARGS="-DCMAKE_PREFIX_PATH=$CONDA_PREFIX"
 fi
+
+cmake -S . -B build $PREFIX_ARGS -DPOPCORN_BUILD_TESTS=ON "$@"
+cmake --build build -j --target unit_kernels
+./build/tests/bin/unit_kernels -v high

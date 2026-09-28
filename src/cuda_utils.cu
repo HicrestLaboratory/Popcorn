@@ -1,42 +1,45 @@
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
 #include "cuda_utils.cuh"
 #include "include/common.h"
 
-using namespace std;
 
+/* Errors throw std::runtime_error, so that a caller (the CLI or the Python
+ * bindings) can report them; the library never calls exit(). */
 void checkCUSPARSE(cusparseStatus_t err, const char* const func, const char* const file, const int line) {
   if (err != CUSPARSE_STATUS_SUCCESS) {
-    cerr << "CUSPARSE Runtime Error at: " << file << ":" << line << endl;
-    // cerr << cudaGetErrorString(err) << " " << func << endl;
-    exit(EXIT_FAILURE);
+    std::ostringstream msg;
+    msg << "cuSPARSE error " << cusparseGetErrorString(err) << " at " << file << ":" << line << " (" << func << ")";
+    throw std::runtime_error(msg.str());
   }
 }
 
 void checkCUBLAS(cublasStatus_t err, const char* const func, const char* const file, const int line) {
   if (err != CUBLAS_STATUS_SUCCESS) {
-    cerr << "CUBLAS Runtime Error at: " << file << ":" << line << endl;
-    // cerr << cudaGetErrorString(err) << " " << func << endl;
-    exit(EXIT_FAILURE);
+    std::ostringstream msg;
+    msg << "cuBLAS error " << static_cast<int>(err) << " at " << file << ":" << line << " (" << func << ")";
+    throw std::runtime_error(msg.str());
   }
 }
 
 void check(cudaError err, const char* const func, const char* const file, const int line) {
   if (err != cudaSuccess) {
-    cerr << "CUDA Runtime Error at: " << file << ":" << line << endl;
-    cerr << cudaGetErrorString(err) << " " << func << endl;
-    exit(EXIT_FAILURE);
+    std::ostringstream msg;
+    msg << "CUDA error: " << cudaGetErrorString(err) << " at " << file << ":" << line << " (" << func << ")";
+    throw std::runtime_error(msg.str());
   }
 }
 
 void checkLast(const char* const file, const int line) {
   cudaError_t err{cudaGetLastError()};
   if (err != cudaSuccess) {
-    cerr << "CUDA Runtime Error at: " << file << ":" << line << endl;
-    cerr << cudaGetErrorName(err) << ": " << cudaGetErrorString(err) << endl;
-    exit(EXIT_FAILURE);
+    std::ostringstream msg;
+    msg << "CUDA error: " << cudaGetErrorName(err) << ": " << cudaGetErrorString(err) << " at " << file << ":" << line;
+    throw std::runtime_error(msg.str());
   }
 }
 

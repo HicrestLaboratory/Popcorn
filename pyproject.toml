@@ -1,0 +1,28 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "popcorn-kkm"
+version = "1.0.0"
+description = "Kernel k-means on the GPU: Popcorn (sparse linear algebra) and FlashKKM (no stored kernel matrix)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+sparse = ["scipy"]   # scipy.sparse inputs
+
+[tool.scikit-build]
+cmake.version = ">=3.24"
+cmake.build-type = "Release"
+# Only the Python module (and the libraries it needs)
+build.targets = ["_popcorn"]
+wheel.packages = ["python/popcorn"]
+
+[tool.scikit-build.cmake.define]
+POPCORN_BUILD_PYTHON = "ON"
+
+[tool.pytest.ini_options]
+# PYTHONPATH=<build>/python python -m pytest   (needs a GPU; a few minutes)
+testpaths = ["python/tests"]

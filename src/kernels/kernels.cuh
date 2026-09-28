@@ -11,7 +11,9 @@
 #include "../include/common.h"
 #include "../cuda_utils.cuh"
 #include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 #include <thrust/binary_search.h>
+#include <thrust/iterator/counting_iterator.h>
 
 
 
@@ -64,24 +66,31 @@ struct LinearKernel
 };
 
 
-struct SigmoidKernel 
+struct SigmoidKernel
 {
+    /* K = tanh(gamma*x.y + coef0) */
     struct SigmoidUnaryOp
     {
+        const DATA_TYPE gamma;
+        const DATA_TYPE coef0;
+
         __host__ __device__
-        DATA_TYPE operator()(const DATA_TYPE& elem)
+        DATA_TYPE operator()(const DATA_TYPE& elem) const
         {
-            return -2.0*(tanhf(elem + 1));
+            return -2.0*(tanhf(gamma*elem + coef0));
         }
     };
 
-    static void function(const uint32_t n,
-                         const uint32_t d,
-                         DATA_TYPE * d_B)
+    DATA_TYPE gamma;
+    DATA_TYPE coef0;
+
+    void function(const uint32_t n,
+                  const uint32_t d,
+                  DATA_TYPE * d_B) const
     {
         thrust::device_ptr<DATA_TYPE> d_B_ptr(d_B);
         unsigned long long offset = static_cast<unsigned long long>(n)*static_cast<unsigned long long>(n);
-        thrust::transform(d_B_ptr, d_B_ptr+offset, d_B_ptr, SigmoidUnaryOp());
+        thrust::transform(d_B_ptr, d_B_ptr+offset, d_B_ptr, SigmoidUnaryOp{gamma, coef0});
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
     }
 
@@ -89,33 +98,110 @@ struct SigmoidKernel
 
 
 
-struct PolynomialKernel 
+struct PolynomialKernel
 {
-
+    /* K = (gamma*x.y + coef0)^degree */
     struct PolynomialUnaryOp
     {
+        const DATA_TYPE gamma;
+        const DATA_TYPE coef0;
+        const DATA_TYPE degree;
+
         __host__ __device__
-        DATA_TYPE operator()(const DATA_TYPE& elem)
+        DATA_TYPE operator()(const DATA_TYPE& elem) const
         {
-            return -2.0*powf(elem + 1, 2);
+            return -2.0*powf(gamma*elem + coef0, degree);
         }
     };
 
+    DATA_TYPE gamma;
+    DATA_TYPE coef0;
+    int degree;
 
-    static void function(const unsigned long long n,
-                         const uint32_t d,
-                         DATA_TYPE * d_B)
+    void function(const unsigned long long n,
+                  const uint32_t d,
+                  DATA_TYPE * d_B) const
     {
-
-        //TODO: parameterize w/ gamma and c 
         thrust::device_ptr<DATA_TYPE> d_B_ptr(d_B);
         unsigned long long offset = static_cast<unsigned long long>(n)*static_cast<unsigned long long>(n);
-        thrust::transform(d_B_ptr, d_B_ptr+offset, d_B_ptr, PolynomialUnaryOp());
+        thrust::transform(d_B_ptr, d_B_ptr+offset, d_B_ptr,
+                          PolynomialUnaryOp{gamma, coef0, static_cast<DATA_TYPE>(degree)});
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
     }
 
 };
+
+
+struct GaussianKernel
+{
+    /* On input d_B holds the Gram matrix G = X X^T. Entry (i,j) becomes
+     * -2*exp(-gamma*(G_ii + G_jj - 2*G_ij)) = -2*exp(-gamma*||x_i - x_j||^2).
+     * d_diag holds a copy of diag(G), so the in-place update can read it. */
+    struct GaussianOp
+    {
+        const DATA_TYPE * d_B;
+        const DATA_TYPE * d_diag;
+        const unsigned long long n;
+        const DATA_TYPE gamma;
+
+        __host__ __device__
+        DATA_TYPE operator()(const unsigned long long idx) const
+        {
+            const unsigned long long i = idx / n;
+            const unsigned long long j = idx % n;
+            const DATA_TYPE sq_dist = d_diag[i] + d_diag[j] - 2*d_B[idx];
+            return -2.0*expf(-gamma*sq_dist);
+        }
+    };
+
+    struct GetDiagOp
+    {
+        const DATA_TYPE * d_B;
+        const unsigned long long n;
+
+        __host__ __device__
+        DATA_TYPE operator()(const unsigned long long i) const
+        {
+            return d_B[i*n + i];
+        }
+    };
+
+    DATA_TYPE gamma;
+
+    void function(const unsigned long long n,
+                  const uint32_t d,
+                  DATA_TYPE * d_B) const
+    {
+        thrust::device_vector<DATA_TYPE> d_diag(n);
+        thrust::counting_iterator<unsigned long long> first(0);
+
+        thrust::transform(first, first+n, d_diag.begin(), GetDiagOp{d_B, n});
+
+        const unsigned long long offset = n*n;
+        thrust::device_ptr<DATA_TYPE> d_B_ptr(d_B);
+        thrust::transform(first, first+offset, d_B_ptr,
+                          GaussianOp{d_B, thrust::raw_pointer_cast(d_diag.data()), n, gamma});
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    }
+};
+
+
+/**
+ * @brief Z-score normalization of each feature (column) of the row-major
+ * n x d matrix d_points, in place: x_ij = (x_ij - mean_j) / std_j, with the
+ * population standard deviation. A constant feature becomes 0.
+ * If d_mean_out and d_std_out are not null (d values each, device memory),
+ * the statistics are also written there (std 1 for constant features).
+ */
+void zscore_normalize(DATA_TYPE * d_points, const size_t n, const uint32_t d,
+                      double * d_mean_out = nullptr, double * d_std_out = nullptr);
+
+/**
+ * @brief Apply given per-feature statistics (from zscore_normalize of the
+ * training data) to other points: x_ij = (x_ij - mean_j) / std_j, in place.
+ */
+void zscore_apply(DATA_TYPE * d_points, const size_t n, const uint32_t d,
+                  const double * d_mean, const double * d_std);
 
 
 /*////// SCHEDULE FUNCTIONS ///////*/
@@ -315,28 +401,6 @@ __global__ void compute_v_sparse_csr(DATA_TYPE * d_vals,
 
 // CSR permuted 
 template <typename ClusterIter>
-__global__ void compute_v_sparse_csr_permuted(DATA_TYPE * d_vals,
-                                             int32_t * d_colinds,
-                                             int32_t * d_row_offsets,
-                                             ClusterIter d_points_clusters,
-                                             uint32_t * d_clusters_len,
-                                             uint32_t * d_clusters_offsets,
-                                             uint32_t * d_perm_vec,
-                                             const size_t n,
-                                             const uint32_t k)
-{
-    const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-    if (tid < n) {
-        const uint32_t idx = d_perm_vec[tid];
-        const uint32_t cluster = d_points_clusters[idx];
-        d_vals[tid] = 1 / (DATA_TYPE)(d_clusters_len[cluster]);
-        d_colinds[tid] = tid;
-    }
-    d_row_offsets[k] = n;
-}
-
-
-template <typename ClusterIter>
 __global__ void compute_perm_vec(uint32_t * d_perm_vec,
                                  ClusterIter d_points_clusters,
                                  uint32_t * d_clusters_offsets,
@@ -357,13 +421,6 @@ __global__ void init_z(const uint32_t n, const uint32_t k,
                        const DATA_TYPE * d_distances,
                        const int32_t * V_rowinds,
                        DATA_TYPE * d_z_vals);
-
-__global__ void init_z_permuted(const uint32_t n, const uint32_t k,
-                               const DATA_TYPE * d_distances,
-                               const uint32_t * d_clusters,
-                               const int32_t * V_rowinds,
-                               const uint32_t * d_perm_vec,
-                               DATA_TYPE * d_z_vals);
 
                     
 
@@ -479,28 +536,6 @@ void compute_distances_spmm(const cusparseHandle_t& handle,
                                         cusparseDnMatDescr_t& D,
                                         DATA_TYPE * d_distances);
 
-void compute_distances_popcorn_naive(const uint32_t d, 
-                                     const uint32_t n,
-                                     const uint32_t k,
-                                     const DATA_TYPE * d_B,
-                                     int32_t * d_clusters,
-                                     const uint32_t * d_clusters_len,
-                                     DATA_TYPE * d_c_norms,
-                                     DATA_TYPE * d_distances);
-
-void compute_distances_popcorn_spmm(const cusparseHandle_t& handle,
-                                        const uint32_t d, 
-                                        const uint32_t n,
-                                        const uint32_t k,
-                                        const DATA_TYPE * d_points_row_norms,
-                                        const cusparseDnMatDescr_t& B,
-                                        const cusparseSpMatDescr_t& V,
-                                        cusparseDnMatDescr_t& D,
-                                        cusparseDnMatDescr_t& C,
-                                        const int32_t * d_clusters,
-                                        DATA_TYPE * d_distances,
-                                        int level);
-
 void compute_distances_popcorn_spmv(const cusparseHandle_t& handle,
                                         const uint32_t d, 
                                         const uint32_t n,
@@ -511,10 +546,8 @@ void compute_distances_popcorn_spmv(const cusparseHandle_t& handle,
                                         cusparseDnMatDescr_t& D,
                                         cusparseDnVecDescr_t& c_tilde,
                                         cusparseDnVecDescr_t& z,
-                                        const uint32_t * d_perm_vec,
                                         const int32_t * d_clusters,
-                                        DATA_TYPE * d_distances,
-                                        bool do_reorder);
+                                        DATA_TYPE * d_distances);
 
 __global__ void scale_diag(DATA_TYPE * d_M, const uint32_t n, const DATA_TYPE alpha);
 
@@ -525,45 +558,6 @@ __global__ void compute_kernel_matrix_naive(DATA_TYPE * d_K,
                                             const uint32_t d, 
                                             const uint32_t d_closest_2_pow);
 
-__global__ void compute_kernel_matrix_naive_blockreduce(DATA_TYPE * d_K, 
-                                                        const DATA_TYPE * d_P, 
-                                                        const unsigned long long n, 
-                                                        const unsigned long long d, 
-                                                        const unsigned long long d_closest_2_pow);
-
-
-
-template <typename Kernel>
-void init_kernel_mtx_naive(cublasHandle_t& cublasHandle,
-                         cudaDeviceProp * deviceProps,
-                         const unsigned long long n,
-                         const uint32_t k,
-                         const uint32_t d,
-                         const DATA_TYPE * d_points,
-                         DATA_TYPE * d_B)
-{
-    const unsigned long long d_pow2 = pow(2, ceil(log2(d)));
-
-    if (n > d) {
-        const uint32_t tpb = 1024;
-        const uint32_t wpb = tpb / 32;
-        const uint64_t blocks = ceil((unsigned long long )(n*n) / (double)wpb);
-
-        compute_kernel_matrix_naive<<<blocks, tpb>>>(d_B, d_points, n, d, d_pow2);
-        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-    } else {
-        const uint32_t tpb = 128;
-        const uint64_t blocks = ceil((unsigned long long )(n*n) );
-
-        compute_kernel_matrix_naive_blockreduce<<<blocks, tpb>>>(d_B, d_points, n, d, d_pow2);
-        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-    }
-
-    Kernel::function(n, d, d_B);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-}
-
-
 template <typename Kernel>
 void init_kernel_mtx_gemm(cublasHandle_t& cublasHandle,
                          cudaDeviceProp * deviceProps,
@@ -571,7 +565,8 @@ void init_kernel_mtx_gemm(cublasHandle_t& cublasHandle,
                          const uint32_t k,
                          const uint32_t d,
                          const DATA_TYPE * d_points,
-                         DATA_TYPE * d_B)
+                         DATA_TYPE * d_B,
+                         const Kernel& kernel)
 {
     DATA_TYPE b_beta = 0.0;
     DATA_TYPE b_alpha = 1.0;
@@ -588,7 +583,7 @@ void init_kernel_mtx_gemm(cublasHandle_t& cublasHandle,
 
     CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
-    Kernel::function(n, d, d_B);
+    kernel.function(n, d, d_B);
     CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 }
 
@@ -599,7 +594,8 @@ void init_kernel_mtx_syrk(cublasHandle_t& cublasHandle,
                          const uint32_t k,
                          const uint32_t d,
                          const DATA_TYPE * d_points,
-                         DATA_TYPE * d_B)
+                         DATA_TYPE * d_B,
+                         const Kernel& kernel)
 {
     DATA_TYPE b_beta = 0.0;
     DATA_TYPE b_alpha = 1.0;
@@ -641,7 +637,7 @@ void init_kernel_mtx_syrk(cublasHandle_t& cublasHandle,
     CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
     //TODO: Make triangular version of these
-    Kernel::function(n, d, d_B);
+    kernel.function(n, d, d_B);
     CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
     CHECK_CUDA_ERROR(cudaFree(d_B_tmp));
@@ -657,64 +653,17 @@ void init_kernel_mtx(cublasHandle_t& cublasHandle,
                      const uint32_t d,
                      const DATA_TYPE * d_points,
                      DATA_TYPE * d_B,
-                     int level)
+                     const Kernel& kernel)
 {
-    switch(level)
-    {
-        case NAIVE_GPU:
-            init_kernel_mtx_gemm<Kernel>(cublasHandle, deviceProps,
-                                          n, k, d,
-                                          d_points, d_B);
-            break;
-
-        case NAIVE_MTX:
-            std::cerr<<"ERROR, level "<<NAIVE_MTX<<" should never be used."<<std::endl;
-            exit(1);
-            init_kernel_mtx_gemm<Kernel>(cublasHandle, deviceProps,
-                                          n, k, d,
-                                          d_points, d_B);
-            break;
-
-        case OPT_MTX:
-        {
-            float ratio = static_cast<double>(n) / static_cast<double>(d);
-            if (ratio > GEMM_THRESHOLD)
-                init_kernel_mtx_gemm<Kernel>(cublasHandle, deviceProps,
-                                              n, k, d,
-                                              d_points, d_B);
-            else
-                init_kernel_mtx_syrk<Kernel>(cublasHandle, deviceProps,
-                                              n, k, d,
-                                              d_points, d_B);
-        }
-        break;
-
-        case REORDER:
-            std::cerr<<"ERROR, level "<<REORDER<<" should never be used."<<std::endl;
-            exit(1);
-            init_kernel_mtx_syrk<Kernel>(cublasHandle, deviceProps,
-                                          n, k, d,
-                                          d_points, d_B);
-            break;
-
-        case FINAL:
-        {
-            std::cerr<<"ERROR, level "<<FINAL<<" should never be used."<<std::endl;
-            exit(1);
-            float ratio = static_cast<double>(n) / static_cast<double>(d);
-            if (ratio > GEMM_THRESHOLD)
-                init_kernel_mtx_gemm<Kernel>(cublasHandle, deviceProps,
-                                              n, k, d,
-                                              d_points, d_B);
-            else
-                init_kernel_mtx_syrk<Kernel>(cublasHandle, deviceProps,
-                                              n, k, d,
-                                              d_points, d_B);
-            break;
-        }
-
-            
-    }
+    float ratio = static_cast<double>(n) / static_cast<double>(d);
+    if (ratio > GEMM_THRESHOLD)
+        init_kernel_mtx_gemm<Kernel>(cublasHandle, deviceProps,
+                                      n, k, d,
+                                      d_points, d_B, kernel);
+    else
+        init_kernel_mtx_syrk<Kernel>(cublasHandle, deviceProps,
+                                      n, k, d,
+                                      d_points, d_B, kernel);
 }
 
 
@@ -726,36 +675,17 @@ __global__ void sum_points(const DATA_TYPE * d_K,
                             const uint32_t n, const uint32_t k,
                             const uint32_t n_thread_ceil);
 
-__global__ void sum_points_largek(const DATA_TYPE * d_K,
-                                    int32_t * d_clusters,
-                                    const uint32_t * d_clusters_len,
-                                    DATA_TYPE * d_distances,
-                                    const uint32_t n, const uint32_t k,
-                                    const uint32_t n_thread_ceil);
-
 __global__ void sum_centroids(const DATA_TYPE * d_K,
                             const int32_t * d_clusters,
                             const uint32_t * d_clusters_len, DATA_TYPE * d_centroids,
                             const uint32_t n, const uint32_t k,
                             const uint32_t n_ceil);
 
-__global__ void sum_centroids_largek(const DATA_TYPE * d_K,
-                                        int32_t * d_clusters,
-                                        const uint32_t * d_clusters_len,
-                                        DATA_TYPE * d_centroids,
-                                        const uint32_t n, const uint32_t k);
-
 __global__ void compute_distances_naive(const DATA_TYPE * d_K,
                                         const DATA_TYPE * d_centroids,
                                         const DATA_TYPE * d_tmp,
                                         DATA_TYPE * d_distances,
                                         const uint32_t n, const uint32_t k);
-
-__global__ void make_kvpairs(const uint32_t * d_perm_vec,
-                             const uint32_t * d_perm_vec_prev,
-                             const uint32_t * d_nonzero_inds,
-                             Kvpair * d_perm_pairs,
-                             const uint32_t n, const uint32_t nnz);
 
 __global__ void check_convergence( const DATA_TYPE * d_centroids,
                                     const DATA_TYPE * d_last_centroids,

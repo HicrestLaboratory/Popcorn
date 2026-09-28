@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <stdio.h>
@@ -257,7 +258,7 @@ void compute_gemm_distances (cublasHandle_t& handle, cudaDeviceProp * deviceProp
                                 DATA_TYPE* d_P, DATA_TYPE* d_C, DATA_TYPE* d_distances) {
 
     std::cerr<<"THIS SHOULD NOT BE CALLED"<<std::endl;
-    exit(1);
+    throw std::runtime_error("legacy function should not be called");
 
 	DATA_TYPE alpha = (DATA_TYPE)1;
 	DATA_TYPE beta = (DATA_TYPE)0;
@@ -269,7 +270,7 @@ void compute_gemm_distances (cublasHandle_t& handle, cudaDeviceProp * deviceProp
 		h_distances = new DATA_TYPE[n * k];
 	}
 	if (d_tmp_dim <= 0 || max_k_d1 > d_tmp_dim) {
-		if (d_tmp != NULL) CHECK_CUDA_ERROR(cudaFree(d_tmp));
+		if (d_tmp != NULL) cudaFree(d_tmp);   // called from a destructor: no throw
 		if (h_tmp != NULL) delete[] h_tmp;
 		CHECK_CUDA_ERROR(cudaMalloc(&d_tmp, max_k_d1 * max_k_d1 * sizeof(DATA_TYPE)));
 		h_tmp = new DATA_TYPE[max_k_d1 * max_k_d1];
@@ -459,7 +460,7 @@ __global__ void scale_diag(DATA_TYPE * d_M, const uint32_t n, const DATA_TYPE al
 
 
 void compute_gemm_distances_free () {
-	if (d_tmp != NULL) CHECK_CUDA_ERROR(cudaFree(d_tmp));
+	if (d_tmp != NULL) cudaFree(d_tmp);   // called from a destructor: no throw
 	if (h_distances != NULL) delete[] h_distances;
 	if (h_tmp != NULL) delete[] h_tmp;
 	d_tmp = NULL;
@@ -504,7 +505,7 @@ void check_p_correctness(DATA_TYPE * P, DATA_TYPE * points, uint32_t n, uint32_t
                         <<"Val: "<<val<<endl
                         <<"(i: "<<i<<", j: "<<j<<")"<<endl
                         <<"("<<P[base_idx]<<","<<P[base_idx+n]<<","<<P[base_idx+2*n]<<")"<<endl;
-                exit(1);
+                throw std::runtime_error("legacy function should not be called");
             }
 
         }
@@ -530,7 +531,7 @@ void check_c_correctness(DATA_TYPE * C, DATA_TYPE * centroids, uint32_t k, uint3
                         <<"Val: "<<val<<endl
                         <<"(i: "<<i<<", j: "<<j<<")"<<endl
                         <<"("<<C[base_idx]<<","<<C[base_idx+1]<<","<<C[base_idx+2]<<")"<<endl;
-                exit(1);
+                throw std::runtime_error("legacy function should not be called");
             }
 
         }
@@ -570,21 +571,6 @@ __global__ void compute_norm_mtx(const uint32_t m, const uint32_t n,
 }
 
 
-__global__ void add_norm_mtx_naive(const uint32_t m, const uint32_t n,
-                                     DATA_TYPE * d_centroids_norms, 
-                                     const DATA_TYPE * d_points_norms,
-                                     DATA_TYPE * M)
-{
-    const uint32_t tid = threadIdx.x + (blockDim.x * blockIdx.x);
-    if (tid < m*n) {
-        const uint64_t centroid_norm_idx = tid % n;
-        const uint64_t point_norm_idx = tid / n;
-        d_centroids_norms[centroid_norm_idx] = (d_centroids_norms[centroid_norm_idx] == 0) ? INFINITY : d_centroids_norms[centroid_norm_idx];
-        M[tid] += (d_centroids_norms[centroid_norm_idx] + 0);
-    }
-}
-
-
 __global__ void add_norm_mtx(const uint32_t m, const uint32_t n,
                              DATA_TYPE * d_centroids_norms, 
                              DATA_TYPE * M)
@@ -592,20 +578,6 @@ __global__ void add_norm_mtx(const uint32_t m, const uint32_t n,
     const uint32_t tid = threadIdx.x + (blockDim.x * blockIdx.x);
     if (tid < m*n) {
         const uint64_t centroid_norm_idx = tid % n;
-        d_centroids_norms[centroid_norm_idx] = (d_centroids_norms[centroid_norm_idx] == 0) ? INFINITY : d_centroids_norms[centroid_norm_idx];
-        M[tid] += (d_centroids_norms[centroid_norm_idx]);
-    }
-}
-
-
-__global__ void add_norm_mtx_permuted(const uint32_t m, const uint32_t n,
-                                      DATA_TYPE * d_centroids_norms, 
-                                      const uint32_t * d_perm_vec,
-                                      DATA_TYPE * M)
-{
-    const uint32_t tid = threadIdx.x + (blockDim.x * blockIdx.x);
-    if (tid < m*n) {
-        const uint64_t centroid_norm_idx = d_perm_vec[tid % n];
         d_centroids_norms[centroid_norm_idx] = (d_centroids_norms[centroid_norm_idx] == 0) ? INFINITY : d_centroids_norms[centroid_norm_idx];
         M[tid] += (d_centroids_norms[centroid_norm_idx]);
     }
@@ -713,21 +685,6 @@ __global__ void init_z(const uint32_t n, const uint32_t k,
     }
 }
 
-__global__ void init_z_permuted(const uint32_t n, const uint32_t k,
-                               const DATA_TYPE * d_distances,
-                               const int32_t * d_clusters,
-                               const uint32_t * d_perm_vec,
-                               DATA_TYPE * d_z_vals)
-{
-    const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-    if (tid < n) {
-        const uint32_t z_idx = d_perm_vec[tid];
-        const int32_t rid = d_clusters[z_idx];
-        d_z_vals[tid] = d_distances[rid + (k*z_idx)];
-    }
-}
-
-
 __global__  void filter_c_norms(const uint32_t k,
                                 DATA_TYPE * c_norms)
 {
@@ -737,160 +694,6 @@ __global__  void filter_c_norms(const uint32_t k,
     }
 }
 
-
-void compute_distances_popcorn_naive(const uint32_t d, 
-                                     const uint32_t n,
-                                     const uint32_t k,
-                                     const DATA_TYPE * d_B,
-                                     int32_t * d_clusters,
-                                     const uint32_t * d_clusters_len,
-                                     DATA_TYPE * d_c_norms,
-                                     DATA_TYPE * d_distances)
-{
-
-    DATA_TYPE * d_tmp;
-    cudaMalloc(&d_tmp, sizeof(DATA_TYPE)*n*k);
-
-
-    uint32_t reduce_tpb; 
-    if (k<=10)
-        reduce_tpb = 128;
-    else
-        reduce_tpb = 64;
-    const uint32_t reduce_blocks = n;
-    const uint32_t n_thread_ceil = ceil((double)n / (double) reduce_tpb) * reduce_tpb;
-
-    sum_points<<<reduce_blocks, reduce_tpb>>>(d_B,
-                                              d_clusters,
-                                              d_clusters_len,
-                                              d_tmp,
-                                              n, k, n_thread_ceil);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-
-    const uint32_t centroid_tpb = 512;
-    const uint32_t centroid_blocks = ceil((double)n /(double)centroid_tpb);
-
-    sum_centroids<<<centroid_blocks, centroid_tpb>>>(d_tmp,
-                                                      d_clusters,
-                                                      d_clusters_len,
-                                                      d_c_norms,
-                                                      n, k,
-                                                      n_thread_ceil);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-    const uint32_t distances_tpb = 1024;
-    const uint32_t distances_blocks = ceil( (double)(n*k) / (double)distances_tpb);
-    compute_distances_naive<<<distances_blocks, distances_tpb>>>
-                            (d_B, d_c_norms, d_tmp, d_distances, n, k);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-    CHECK_CUDA_ERROR(cudaMemset(d_c_norms, 0, sizeof(DATA_TYPE)*k));
-
-    CHECK_CUDA_ERROR(cudaFree(d_tmp));
-
-}
-
-
-void compute_distances_popcorn_spmm(const cusparseHandle_t& handle,
-                                        const uint32_t d, 
-                                        const uint32_t n,
-                                        const uint32_t k,
-                                        const DATA_TYPE * d_points_row_norms,
-                                        const cusparseDnMatDescr_t& B,
-                                        const cusparseSpMatDescr_t& V,
-                                        cusparseDnMatDescr_t& D,
-                                        cusparseDnMatDescr_t& C,
-                                        const int32_t * d_clusters,
-                                        DATA_TYPE * d_distances,
-                                        int level) 
-{
-    DATA_TYPE alpha = 1.0; 
-    const DATA_TYPE beta = 0.0;
-    
-    size_t buff_size = 0;
-
-    CHECK_CUSPARSE_ERROR(cusparseSpMM_bufferSize(handle,
-                                                  CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                                  CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                                  &alpha,
-                                                  V,
-                                                  B,
-                                                  &beta,
-                                                  D,
-                                                  CUDA_R_32F,
-                                                  CUSPARSE_SPMM_CSR_ALG2,
-                                                  &buff_size));
-    
-    void * d_buff;
-    CHECK_CUDA_ERROR(cudaMalloc(&d_buff, buff_size));
-
-    CHECK_CUSPARSE_ERROR(cusparseSpMM(handle,
-                                      CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                      CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                      &alpha,
-                                      V,
-                                      B,
-                                      &beta,
-                                      D,
-                                      CUDA_R_32F,
-                                      CUSPARSE_SPMM_CSR_ALG2,
-                                      d_buff));
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-    CHECK_CUSPARSE_ERROR(cusparseDnMatGetValues(D, (void**)&d_distances));
-
-    CHECK_CUDA_ERROR(cudaFree(d_buff));
-
-
-    CHECK_CUSPARSE_ERROR(cusparseSpMM_bufferSize(handle,
-                                              CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                              CUSPARSE_OPERATION_TRANSPOSE,
-                                              &alpha,
-                                              V,
-                                              D,
-                                              &beta,
-                                              C,
-                                              CUDA_R_32F,
-                                              CUSPARSE_SPMM_CSR_ALG2,
-                                              &buff_size));
-
-    CHECK_CUDA_ERROR(cudaMalloc(&d_buff, buff_size));
-
-    CHECK_CUSPARSE_ERROR(cusparseSpMM(handle,
-                                      CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                      CUSPARSE_OPERATION_TRANSPOSE,
-                                      &alpha,
-                                      V,
-                                      D,
-                                      &beta,
-                                      C,
-                                      CUDA_R_32F,
-                                      CUSPARSE_SPMM_CSR_ALG2,
-                                      d_buff));
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-    CHECK_CUDA_ERROR(cudaFree(d_buff));
-
-	DATA_TYPE * d_c_norms;
-    CHECK_CUDA_ERROR(cudaMalloc(&d_c_norms, sizeof(DATA_TYPE)*k));
-
-    const uint32_t block_dim_diag = min(k, 1024); 
-    const uint32_t grid_dim_diag = ceil((float)k / (float)block_dim_diag);
-
-    /* Extract diagonal from CC^T */
-    DATA_TYPE * d_C_vals;
-    CHECK_CUSPARSE_ERROR(cusparseDnMatGetValues(C, (void**)(&d_C_vals)));
-    copy_diag_scal<<<grid_dim_diag, block_dim_diag>>>(d_C_vals, d_c_norms, k, k, -2.0);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-
-    const uint32_t block_dim = min(n*k, 1024); 
-    const uint32_t grid_dim = ceil((float)n*k / (float)block_dim);
-    add_norm_mtx_naive<<<grid_dim, block_dim>>>(n, k, d_c_norms,
-                                                d_points_row_norms,
-                                                d_distances);
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-    CHECK_CUDA_ERROR(cudaFree(d_c_norms));
-}
 
 void compute_distances_popcorn_spmv(const cusparseHandle_t& handle,
                                         const uint32_t d, 
@@ -902,10 +705,8 @@ void compute_distances_popcorn_spmv(const cusparseHandle_t& handle,
                                         cusparseDnMatDescr_t& D,
                                         cusparseDnVecDescr_t& c_tilde,
                                         cusparseDnVecDescr_t& z,
-                                        const uint32_t * d_perm_vec,
                                         const int32_t * d_clusters,
-                                        DATA_TYPE * d_distances,
-                                        bool do_reorder)
+                                        DATA_TYPE * d_distances)
 {
 
     /* d_distances = BV^T.
@@ -961,11 +762,7 @@ void compute_distances_popcorn_spmv(const cusparseHandle_t& handle,
 
     const uint32_t block_dim_z = 256; 
     const uint32_t grid_dim_z = ceil((float)n / (float)block_dim_z);
-    if (do_reorder) {
-        init_z_permuted<<<grid_dim_z, block_dim_z>>>(n, k, d_distances, d_clusters, d_perm_vec, d_z_vals);
-    } else {
-        init_z<<<grid_dim_z, block_dim_z>>>(n, k, d_distances, d_clusters, d_z_vals);
-    }
+    init_z<<<grid_dim_z, block_dim_z>>>(n, k, d_distances, d_clusters, d_z_vals);
 
     /* SpMV to compute c_tilde */
     CHECK_CUSPARSE_ERROR(cusparseDnVecGetValues(c_tilde, (void**)&d_c_norms));
@@ -1036,26 +833,6 @@ __global__ void sum_points(const DATA_TYPE * d_K,
 }
 
 /* Does not use shared memory because k is too large */
-__global__ void sum_points_largek(const DATA_TYPE * d_K,
-                                    int32_t * d_clusters,
-                                    const uint32_t * d_clusters_len,
-                                    DATA_TYPE * d_distances,
-                                    const uint32_t n, const uint32_t k,
-                                    const uint32_t n_thread_ceil)
-{
-    const uint64_t point_id = blockIdx.x;
-
-    /* Reduce all inner products in the same cluster */
-    for (int j=threadIdx.x; j<n_thread_ceil; j += blockDim.x) {
-        if (j<n) {
-            const uint32_t cluster = d_clusters[j];
-            const DATA_TYPE thread_data = d_K[point_id * n + j] / d_clusters_len[cluster];
-            atomicAdd(d_distances + ((point_id * k) + cluster), thread_data); 
-        }
-    }
-
-}
-
 __global__ void sum_centroids(const DATA_TYPE * d_tmp,
                             const int32_t * d_clusters,
                             const uint32_t * d_clusters_len,
@@ -1074,29 +851,6 @@ __global__ void sum_centroids(const DATA_TYPE * d_tmp,
         thread_data /= static_cast<DATA_TYPE>(len);
         atomicAdd(&d_centroids[c], thread_data);
     }
-
-}
-
-
-__global__ void sum_centroids_largek(const DATA_TYPE * d_K,
-                                        int32_t * d_clusters,
-                                        const uint32_t * d_clusters_len,
-                                        DATA_TYPE * d_centroids,
-                                        const uint32_t n, const uint32_t k)
-{
-
-    const uint32_t tid = blockDim.x * blockIdx.x + threadIdx.x;
-    const uint32_t i = tid / n;
-    const uint32_t j = tid % n;
-
-    /* Reduction */
-    if (i < n) {
-        const uint32_t cluster_i = d_clusters[i];
-        const uint32_t cluster_j = d_clusters[j];
-        DATA_TYPE thread_data = (cluster_i == cluster_j) ? d_K[j + i*n]/-2 : 0;
-        atomicAdd(d_centroids + cluster_i, (thread_data / (double)pow(d_clusters_len[cluster_i], 2)));
-    }
-
 
 }
 
@@ -1153,61 +907,6 @@ __global__ void compute_kernel_matrix_naive(DATA_TYPE * d_K,
         d_K[point_id_x + point_id_y*n] = result;
     }
 }
-
-
-__global__ void compute_kernel_matrix_naive_blockreduce(DATA_TYPE * d_K, 
-                                                        const DATA_TYPE * d_P, 
-                                                        const unsigned long long n, 
-                                                        const unsigned long long d, 
-                                                        const unsigned long long d_closest_2_pow)
-{
-    using BlockReduce = cub::BlockReduce<DATA_TYPE, 128>;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
-
-    const unsigned long long tid = (unsigned long long)threadIdx.x + 
-                                    (unsigned long long )blockDim.x * 
-                                    (unsigned long long)blockIdx.x;
-
-    const uint32_t tpb = blockDim.x;
-
-	const unsigned long long point_id_x = (blockIdx.x % n);
-	const unsigned long long point_id_y = (blockIdx.x / n);
-
-    const unsigned long long offset_x = d * point_id_x + threadIdx.x;
-    const unsigned long long offset_y = d * point_id_y + threadIdx.x;
-
-    DATA_TYPE result = 0;
-
-    for (unsigned long long j=0; j<d_closest_2_pow; j+=blockDim.x) {
-        DATA_TYPE reg = (threadIdx.x + j < d && point_id_y < n) ? 
-                         d_P[offset_x + j] * d_P[offset_y + j] : 0;
-        result += BlockReduce(temp_storage).Sum(reg);
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0 && point_id_y < n) {
-        d_K[point_id_x + point_id_y*n] = result;
-    }
-}
-
-
-__global__ void make_kvpairs(const uint32_t * d_perm_vec,
-                             const uint32_t * d_perm_vec_prev,
-                             const uint32_t * d_nonzero_inds,
-                             Kvpair * d_perm_pairs,
-                             const uint32_t n, const uint32_t nnz)
-{
-    const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-    if (tid < nnz) {
-        const uint32_t i = d_nonzero_inds[tid];
-        const uint32_t j = d_perm_vec[i];
-        const uint32_t l = d_perm_vec_prev[j];
-        d_perm_pairs[tid].key = i;
-        d_perm_pairs[tid].value = l;
-    }
-}
-
-
 
 
 /*** END Matrix multiplication ***/
