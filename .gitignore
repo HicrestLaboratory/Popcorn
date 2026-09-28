@@ -7,7 +7,6 @@ datasets-unzipped
 ## FILES
 out/*/*.csv
 temp-plot.html
-# nsight_profiling/GPU_Kmeans/*.nsys-rep
 
 ## Testing framework
 Catch2

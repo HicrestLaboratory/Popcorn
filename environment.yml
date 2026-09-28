@@ -1,0 +1,22 @@
+# Conda environment that supplies prebuilt RAFT (header-only) and its
+# dependencies (RMM, CCCL, spdlog, fmt). The CUDA compiler and the CUDA math
+# libraries come from the system CUDA toolkit.
+#
+#   conda env create -f environment.yml
+#   conda activate popcorn
+name: popcorn
+channels:
+  - rapidsai
+  - conda-forge
+  - nvidia
+  - nodefaults
+dependencies:
+  - libraft-headers=24.08
+  - cuda-version=12.2
+  # Python bindings (cmake -DPOPCORN_BUILD_PYTHON=ON, or pip install .)
+  - python>=3.10
+  - numpy
+  - scipy        # scipy.sparse inputs
+  - pybind11
+  - pytest       # python/tests
+  - pip

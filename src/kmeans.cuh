@@ -45,20 +45,26 @@ const int num_colors = sizeof(colors)/sizeof(uint32_t);
 #endif
 
 
+/* Parameters of the kernel functions:
+ * polynomial (gamma*x.y + coef0)^degree, sigmoid tanh(gamma*x.y + coef0),
+ * gaussian exp(-gamma*||x-y||^2). */
+struct KernelParams
+{
+    DATA_TYPE gamma = 1.0;
+    DATA_TYPE coef0 = 1.0;
+    int degree = 2;
+};
+
+
 class Kmeans {
   public:
-
-    enum class InitMethod
-    {
-        random,
-        plus_plus
-    };
 
     enum class Kernel 
     {
         linear,
         polynomial,
         sigmoid,
+        gaussian
     };
 
 	template <typename IndexT, typename DataT>
@@ -71,53 +77,23 @@ class Kmeans {
 	  }
 	};
 
-    //TODO: Remove unnecessary long longs
-    struct PermuteRowOp : public thrust::unary_function<unsigned long long, unsigned long long>
-    {
-        PermuteRowOp(const unsigned long long _rows,
-                     const unsigned long long _cols,
-                     uint32_t * _d_perm) :
-            rows(_rows), cols(_cols), d_perm(_d_perm) 
-        {}
-
-        __host__ __device__
-        unsigned long long operator()(unsigned long long idx)
-        {
-            unsigned long long i = idx / cols;
-            unsigned long long new_i = (unsigned long long)d_perm[i];
-            unsigned long long j = idx % cols;
-            return (new_i*cols) + j;
-        }
-            
-
-        unsigned long long rows;
-        unsigned long long cols;
-        uint32_t * d_perm;
-
-    };
-
-    struct is_nonzero
-    {
-        __host__ __device__
-        bool operator()(uint32_t a) 
-        {
-            return a != 0;
-        }
-    };
-
-    struct check_not_equals
-    {
-        __host__ __device__
-        uint32_t operator()(uint32_t a, uint32_t b)
-        {
-            return static_cast<uint32_t>(a!=b);
-        }
-    };
-
-    Kmeans(const size_t n, const uint32_t d, const uint32_t k, const float tol, const int *seed, Point<DATA_TYPE>** points, cudaDeviceProp* deviceProps,
-            InitMethod _initMethod=InitMethod::random,
+    /* Compute the kernel matrix from the points (Point objects; run() also
+     * sets their clusters) */
+    Kmeans(const size_t n, const uint32_t d, const uint32_t k, const float tol, Point<DATA_TYPE>** points, cudaDeviceProp* deviceProps,
             Kernel _kernel=Kernel::linear,
-            int _level=3);
+            KernelParams _params=KernelParams{},
+            bool _zscore=false);
+
+    /* Compute the kernel matrix from the points (row-major n x d array in host
+     * memory, copied) */
+    Kmeans(const size_t n, const uint32_t d, const uint32_t k, const float tol, const DATA_TYPE * h_points, cudaDeviceProp* deviceProps,
+            Kernel _kernel=Kernel::linear,
+            KernelParams _params=KernelParams{},
+            bool _zscore=false);
+
+    /* Use a precomputed symmetric n x n kernel matrix (host memory, row-major) */
+    Kmeans(const size_t n, const uint32_t k, const float tol, const DATA_TYPE * h_kernel_matrix,
+            cudaDeviceProp* deviceProps);
     ~Kmeans();
 
     /**
@@ -129,14 +105,14 @@ class Kmeans {
      */
     uint64_t run(uint64_t maxiter, bool check_converged);
 
-    template <typename ClusterIter>
-    void set_perm_vec(ClusterIter clusters,
-                      uint32_t * d_cluster_offsets);
+    /* Initial clusters for run() (host array of n labels in [0, k)) instead of
+     * point i in cluster i mod k */
+    void set_initial_labels(const int32_t * labels);
 
-    void permute_kernel_mat();
-    void permute_kernel_mat_swap(thrust::device_vector<uint32_t> d_indices);
+    inline double get_score() const {return score;}
 
-    inline float get_score() const {return score;}
+    /* Cluster label of each point after run() */
+    inline const std::vector<uint32_t>& get_labels() const {return h_points_clusters;}
 
   private:
     const size_t n;
@@ -145,12 +121,6 @@ class Kmeans {
     const uint64_t POINTS_BYTES;
     uint64_t CENTROIDS_BYTES;
     Point<DATA_TYPE>** points;
-    InitMethod initMethod;
-    int level;
-    mt19937* generator;
-
-    bool do_reorder;
-
     DATA_TYPE* h_points;
     DATA_TYPE* h_centroids;
     DATA_TYPE* d_new_centroids;
@@ -163,13 +133,7 @@ class Kmeans {
     int32_t * d_clusters;
     uint32_t * d_clusters_len;
 
-    uint32_t * d_perm_vec;
-    uint32_t * d_perm_vec_prev;
-
     DATA_TYPE * d_B;
-    DATA_TYPE * d_B_new;
-
-    DATA_TYPE * d_C;
 
     DATA_TYPE * d_V_vals;
     int32_t * d_V_colinds;
@@ -181,16 +145,20 @@ class Kmeans {
 
     cusparseDnMatDescr_t P_descr;
     cusparseDnMatDescr_t B_descr;
-    cusparseDnMatDescr_t D_descr;
-    cusparseDnMatDescr_t C_descr;
+    cusparseDnMatDescr_t D_descr = nullptr;   // created in run()
     cusparseDnVecDescr_t c_tilde_descr;
     cusparseDnVecDescr_t z_descr;
     cusparseSpMatDescr_t V_descr;
     cusparseSpMatDescr_t F_descr;
 
 
-    DATA_TYPE score;
-    DATA_TYPE last_score;
+    /* Kernel k-means objective: sum over points of the squared feature-space
+     * distance to the assigned centroid. */
+    double score;
+    /* Objective without the constant sum_i K(x_i, x_i); used for the
+     * convergence test. */
+    DATA_TYPE cost;
+    DATA_TYPE last_cost;
 
     cudaDeviceProp* deviceProps;
 
@@ -201,7 +169,12 @@ class Kmeans {
      * @brief Select k random centroids sampled form points
      */
     void init_centroids_rand();
-    void init_centroids_plus_plus();
+    /* d_clusters, d_clusters_len, and V from the labels */
+    void load_labels(const std::vector<int32_t>& h_clusters);
+
+    /* Allocate V, the distance descriptors, and set the initial clusters.
+     * Needs d_B. */
+    void init_clusters();
     bool cmp_centroids();
     bool cmp_centroids_col_maj();
 

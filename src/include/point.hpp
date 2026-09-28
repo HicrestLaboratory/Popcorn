@@ -6,7 +6,9 @@
 
 // FIXME multiple definition of `printErrDesc(int)', first defined here #include "errors.hpp"
 
-using namespace std;
+using std::ostream;
+using std::setw;
+using std::setprecision;
 
 template <typename T> 
 class Point {
